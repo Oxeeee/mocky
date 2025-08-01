@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"html/template"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 type MockResponse struct {
@@ -131,9 +133,24 @@ func deleteMockHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func checkVKTunnelInstalled() bool {
-	cmd := exec.Command("vk-tunnel", "--version")
+	log.Println("Checking if VK tunnel is installed...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "vk-tunnel", "--version")
 	err := cmd.Run()
-	return err == nil
+
+	if ctx.Err() == context.DeadlineExceeded {
+		log.Println("VK tunnel version check timed out (probably means it's installed but hangs)")
+		return true 
+	}
+
+	if err != nil {
+		return false
+	}
+
+	return true
 }
 
 func installVKTunnel() error {
@@ -141,7 +158,7 @@ func installVKTunnel() error {
 	cmd := exec.Command("npm", "install", "@vkontakte/vk-tunnel", "-g")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	
+
 	err := cmd.Run()
 	if err != nil {
 		return err
@@ -173,23 +190,25 @@ func startVKTunnel() {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	log.Println("Starting VK tunnel process...")
+	if err := cmd.Start(); err != nil {
+		log.Printf("Failed to start VK tunnel: %v", err)
+		return
+	}
+
 	go func() {
-		if err := cmd.Run(); err != nil {
-			log.Printf("VK tunnel error: %v", err)
+		if err := cmd.Wait(); err != nil {
+			log.Printf("VK tunnel process finished with error: %v", err)
+		} else {
+			log.Println("VK tunnel process finished successfully")
 		}
 	}()
-
-	log.Println("VK tunnel started in background")
 }
 
 func main() {
 	flag.Parse()
 
 	shouldStartTunnel := *enableTunnel || *tunnelShort
-
-	if shouldStartTunnel {
-		startVKTunnel()
-	}
 
 	http.HandleFunc("/__mock/ui", webUIHandler)
 	http.HandleFunc("/__mock/list", listMocksHandler)
@@ -202,7 +221,11 @@ func main() {
 
 	if shouldStartTunnel {
 		log.Println("VK tunnel mode enabled - external access will be available shortly")
+		startVKTunnel()
 	}
 
-	log.Fatal(http.ListenAndServe(":8082", nil))
+	log.Println("Starting HTTP server...")
+	if err := http.ListenAndServe(":8082", nil); err != nil {
+		panic(err)
+	}
 }
