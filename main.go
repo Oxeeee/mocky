@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -143,7 +144,7 @@ func checkVKTunnelInstalled() bool {
 
 	if ctx.Err() == context.DeadlineExceeded {
 		log.Println("VK tunnel version check timed out (probably means it's installed but hangs)")
-		return true 
+		return true
 	}
 
 	if err != nil {
@@ -168,6 +169,37 @@ func installVKTunnel() error {
 	return nil
 }
 
+func openNewTerminal(command string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		cmd := exec.Command("osascript", "-e",
+			`tell application "Terminal" to do script "`+command+`"`)
+		return cmd.Start()
+	case "linux":
+		terminals := []string{"gnome-terminal", "konsole", "xterm", "x-terminal-emulator"}
+		for _, terminal := range terminals {
+			if _, err := exec.LookPath(terminal); err == nil {
+				var cmd *exec.Cmd
+				switch terminal {
+				case "gnome-terminal":
+					cmd = exec.Command(terminal, "--", "bash", "-c", command+"; read -p 'Press Enter to close...'")
+				case "konsole":
+					cmd = exec.Command(terminal, "-e", "bash", "-c", command+"; read -p 'Press Enter to close...'")
+				default:
+					cmd = exec.Command(terminal, "-e", "bash", "-c", command+"; read -p 'Press Enter to close...'")
+				}
+				return cmd.Start()
+			}
+		}
+		return exec.Command("xterm", "-e", "bash", "-c", command+"; read -p 'Press Enter to close...'").Start()
+	case "windows":
+		cmd := exec.Command("cmd", "/c", "start", "cmd", "/k", command)
+		return cmd.Start()
+	default:
+		return exec.Command("xterm", "-e", "bash", "-c", command+"; read -p 'Press Enter to close...'").Start()
+	}
+}
+
 func startVKTunnel() {
 	log.Println("Starting VK tunnel...")
 
@@ -179,30 +211,33 @@ func startVKTunnel() {
 		}
 	}
 
-	cmd := exec.Command("vk-tunnel",
-		"--insecure=1",
-		"--http-protocol=http",
-		"--ws-protocol=ws",
-		"--host=localhost",
-		"--port=8082",
-		"--timeout=5000")
+	vkTunnelCmd := "vk-tunnel --insecure=1 --http-protocol=http --ws-protocol=ws --host=localhost --port=8082 --timeout=5000"
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	log.Printf("Opening new terminal window for VK tunnel (OS: %s)...", runtime.GOOS)
+	log.Println("VK tunnel will run in separate terminal window for interactive authorization")
 
-	log.Println("Starting VK tunnel process...")
-	if err := cmd.Start(); err != nil {
-		log.Printf("Failed to start VK tunnel: %v", err)
+	if err := openNewTerminal(vkTunnelCmd); err != nil {
+		log.Printf("Failed to start VK tunnel in new terminal: %v", err)
+		log.Println("Trying fallback method in current terminal...")
+
+		fallbackCmd := exec.Command("sh", "-c", vkTunnelCmd)
+		fallbackCmd.Stdin = os.Stdin
+		fallbackCmd.Stdout = os.Stdout
+		fallbackCmd.Stderr = os.Stderr
+
+		go func() {
+			log.Println("Starting VK tunnel in current terminal...")
+			log.Println("*** IMPORTANT: You may need to authorize and press ENTER when prompted ***")
+			if err := fallbackCmd.Run(); err != nil {
+				log.Printf("VK tunnel finished with error: %v", err)
+			}
+		}()
 		return
 	}
 
-	go func() {
-		if err := cmd.Wait(); err != nil {
-			log.Printf("VK tunnel process finished with error: %v", err)
-		} else {
-			log.Println("VK tunnel process finished successfully")
-		}
-	}()
+	log.Println("VK tunnel started in new terminal window")
+	log.Println("*** Please complete authorization in the new terminal window ***")
+	log.Println("*** After authorization, VK tunnel URLs will appear in the new terminal ***")
 }
 
 func main() {
